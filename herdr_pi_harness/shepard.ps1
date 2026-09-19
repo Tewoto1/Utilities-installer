@@ -3,13 +3,16 @@
 #   powershell -ExecutionPolicy Bypass -File .\shepard.ps1
 #   powershell -ExecutionPolicy Bypass -File .\shepard.ps1 -Check
 #   powershell -ExecutionPolicy Bypass -File .\shepard.ps1 -NoWezterm
+#   powershell -ExecutionPolicy Bypass -File .\shepard.ps1 -NoAuto     # print commands, install nothing automatically
 # Safe to re-run: every step is skipped if already present.
+# There is no Homebrew on Windows; winget (the built-in Windows package manager) is
+# used instead for Node and WezTerm, and herdr uses its own install.ps1.
 # NOTE: herdr on Windows is a preview/beta build. If it misbehaves, run this stack
 # inside WSL2 with shepard.sh instead - that path is the well-tested one.
-param([switch]$NoWezterm, [switch]$Check)
+param([switch]$NoWezterm, [switch]$Check, [switch]$NoAuto)
 
 $ErrorActionPreference = 'Stop'
-$NodeMin = 20
+$NodeMin = 22   # pi's package.json requires node >= 22.19
 
 function Have($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 function Say($m)  { Write-Host "`n== $m" -ForegroundColor White }
@@ -36,6 +39,8 @@ if ($Check) { Report; exit 0 }
 #      Node LTS from https://nodejs.org, herdr from https://herdr.dev/docs/install.
 Say 'prerequisites'
 if (-not (Have winget)) {
+  # winget cannot be installed from a script: it ships as the Store app "App Installer".
+  Warn 'winget is MISSING and cannot be auto-installed (it comes from the Microsoft Store).' 
   Warn 'winget not found. Install "App Installer" from the Microsoft Store, then reopen PowerShell.'
   Warn 'Manual alternative: wezterm.org/install/windows.html, nodejs.org, herdr.dev/docs/install'
   exit 1
@@ -48,9 +53,17 @@ Ok "winget $(winget --version)"
 #      window so PATH refreshes. If node is installed but not found, add
 #      C:\Program Files\nodejs to PATH.
 if (-not (Have node)) {
+  if ($NoAuto) { Warn 'node is MISSING. Run: winget install --id OpenJS.NodeJS.LTS -e'; exit 1 }
+  Write-Host 'node is MISSING -> installing it now (pi needs node 22+; herdr and WezTerm do not).'
+  Write-Host '  winget install --id OpenJS.NodeJS.LTS -e'
   winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements
-  Warn 'Node installed. Close this window, open a new PowerShell, and re-run this script.'
-  exit 0   # PATH is only picked up by a new shell
+  # winget does not refresh PATH in the running shell; add the default location for this run.
+  $nodeDir = 'C:\Program Files\nodejs'
+  if (Test-Path $nodeDir) { $env:Path = "$nodeDir;$env:Path" }
+  if (-not (Have node)) {
+    Warn 'Node installed but not on PATH here. Close this window, open a new PowerShell, and re-run.'
+    exit 0
+  }
 }
 $nodeMajor = [int]((node -p 'process.versions.node.split(".")[0]'))
 if ($nodeMajor -lt $NodeMin) {
@@ -67,7 +80,9 @@ Ok "node $(node --version)"
 if (-not $NoWezterm) {
   Say 'wezterm (terminal)'
   if (Have wezterm) { Ok 'already installed' }
+  elseif ($NoAuto) { Warn 'wezterm is MISSING. Run: winget install --id wez.wezterm -e' }
   else {
+    Write-Host 'wezterm is MISSING -> installing it now.'
     try { winget install --id wez.wezterm -e --accept-package-agreements --accept-source-agreements; Ok 'installed' }
     catch { Warn "winget failed: $($_.Exception.Message)"; Warn 'Install manually: https://wezterm.org/install/windows.html' }
   }
@@ -81,7 +96,9 @@ if (-not $NoWezterm) {
 #      preview-grade; if it is unusable, use WSL2 + shepard.sh instead.
 Say 'herdr (agent multiplexer, Windows preview)'
 if (Have herdr) { Ok "already installed: $(herdr --version)" }
+elseif ($NoAuto) { Warn 'herdr is MISSING. Run: irm https://herdr.dev/install.ps1 | iex' }
 else {
+  Write-Host 'herdr is MISSING -> installing it now (irm https://herdr.dev/install.ps1 | iex).'
   try { Invoke-RestMethod https://herdr.dev/install.ps1 | Invoke-Expression }
   catch { Warn "herdr install failed: $($_.Exception.Message)" }
 }
@@ -96,7 +113,10 @@ if (-not (Have herdr)) {
 #      then add the folder printed by `npm prefix -g` to PATH and reopen PowerShell.
 Say 'pi (coding agent)'
 if (Have pi) { Ok "already installed: $(pi --version)" }
-else { npm install -g @earendil-works/pi-coding-agent }
+else {
+  Write-Host 'pi is MISSING -> npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
+  npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+}
 if (-not (Have pi)) {
   Warn "pi is not on PATH. Add this to PATH and reopen PowerShell: $(npm prefix -g)"
   exit 1

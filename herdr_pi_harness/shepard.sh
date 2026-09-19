@@ -6,13 +6,15 @@
 #   bash shepard.sh              full install
 #   bash shepard.sh --no-wezterm skip the terminal (keep your current one)
 #   bash shepard.sh --check      report versions only, install nothing
+#   bash shepard.sh --no-auto    never auto-install Homebrew/Node; print the commands instead
 set -euo pipefail
 
-WEZTERM=1; CHECK=0
+WEZTERM=1; CHECK=0; AUTO=1
 for a in "$@"; do
   case "$a" in
     --no-wezterm) WEZTERM=0 ;;
     --check) CHECK=1 ;;
+    --no-auto) AUTO=0 ;;   # never install Homebrew/Node for me; just tell me what to run
     *) echo "unknown flag: $a"; exit 2 ;;
   esac
 done
@@ -35,7 +37,7 @@ case "$OS" in
     echo "Or install WSL2 with 'wsl --install' and run this script inside WSL."
     exit 1 ;;
 esac
-NODE_MIN=20
+NODE_MIN=22   # pi's package.json requires node >= 22.19
 
 report() {
   say "versions"
@@ -54,15 +56,29 @@ if [ "$CHECK" = 1 ]; then report; exit 0; fi
 # ---------------------------------------------------------------- 1. prereqs
 say "prerequisites"
 if [ "$OS" = "Darwin" ]; then
-  # FAILS IF: Homebrew is missing. Every macOS install step below uses it.
-  # FIX (manual): run the install line printed here, then reopen the terminal so
-  # /opt/homebrew/bin is on PATH (Apple Silicon) and re-run this script.
-  # Or install by hand: WezTerm https://wezterm.org/install/macos.html,
+  # Homebrew is macOS/Linux only; there is no Homebrew on Windows (shepard.ps1 uses winget).
+  # FAILS IF: the Homebrew installer is declined, has no sudo rights, or its bin dir is
+  # still missing afterwards.
+  # FIX (manual): run this, then reopen the terminal and re-run this script:
+  #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  # Or skip Homebrew entirely: WezTerm https://wezterm.org/install/macos.html,
   # herdr `curl -fsSL https://herdr.dev/install.sh | sh`, Node https://nodejs.org.
   if ! have brew; then
-    echo "Homebrew is required. Install it first:"
+    if [ "$AUTO" = 0 ]; then
+      echo "Homebrew is missing. Install it, then re-run:"
+      echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+      exit 1
+    fi
+    echo "Homebrew is MISSING -> installing it now (this is the official installer;"
+    echo "it will ask for your password and print everything it does):"
     echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-    exit 1
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # Homebrew does not put itself on PATH for the current shell.
+    for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+      [ -x "$b" ] && eval "$("$b" shellenv)" && break
+    done
+    have brew || { warn "Homebrew installed but not on PATH. Open a new terminal and re-run."; exit 1; }
+    warn "Make it permanent: echo 'eval \"\$($(command -v brew) shellenv)\"' >> ~/.zprofile"
   fi
   ok "homebrew $(brew --version | head -1)"
 elif [ "$OS" != "Linux" ]; then
@@ -72,30 +88,52 @@ elif [ "$OS" != "Linux" ]; then
   echo "This script supports macOS and Linux only (herdr requires one of them)."; exit 1
 fi
 
-# FAILS IF: node is missing on Linux (no single correct package manager to guess).
+# Node is needed ONLY to run pi (it is an npm package requiring node >= 22.19).
+# herdr and WezTerm are native binaries and do not use node.
+#
+# Auto-install: macOS uses Homebrew; Linux uses nvm, which installs into $HOME and
+# needs no sudo (distro nodejs packages are often older than 22).
+# FAILS IF: the download is blocked, or nvm's shell hook does not load.
 # FIX (manual), pick one:
+#   any distro:    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+#                  then: nvm install 22
 #   Debian/Ubuntu: curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs
 #   Fedora:        sudo dnf install -y nodejs
 #   Arch:          sudo pacman -S nodejs npm
-#   any distro:    install nvm (https://github.com/nvm-sh/nvm), then: nvm install 22
 # Then re-run this script.
+install_node_linux() {
+  echo "Installing Node $NODE_MIN via nvm (into \$HOME, no sudo):"
+  echo "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash && nvm install $NODE_MIN"
+  curl -fsSL -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  # shellcheck disable=SC1091
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+  nvm install "$NODE_MIN"
+  warn "nvm added its hook to your shell rc; open a new shell later so 'node' stays on PATH."
+}
 if ! have node; then
-  if [ "$OS" = "Darwin" ]; then brew install node; else
-    echo "Install Node $NODE_MIN+ with your package manager, then re-run."
-    echo "  Debian/Ubuntu: curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs"
-    echo "  Fedora: sudo dnf install -y nodejs   |   Arch: sudo pacman -S nodejs npm"
-    echo "  Or nvm: https://github.com/nvm-sh/nvm  then: nvm install 22"
+  if [ "$AUTO" = 0 ]; then
+    echo "node is MISSING. Install Node $NODE_MIN+ and re-run (macOS: brew install node;"
+    echo "  Linux: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash && nvm install 22)"
     exit 1
   fi
+  echo "node is MISSING -> installing it now (pi needs node $NODE_MIN+; nothing else does)."
+  if [ "$OS" = "Darwin" ]; then echo "  brew install node"; brew install node
+  else install_node_linux; fi
+  have node || { warn "node still not on PATH. Open a new terminal and re-run."; exit 1; }
 fi
-# FAILS IF: node is older than 20, which pi requires.
+# FAILS IF: node is older than 22, which pi requires.
 # FIX (manual): macOS `brew upgrade node`; Linux `nvm install 22 && nvm use 22`,
 # or reinstall from your distro's current nodejs package. Then re-run.
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 if [ "$NODE_MAJOR" -lt "$NODE_MIN" ]; then
   warn "node $NODE_MAJOR is too old; pi needs $NODE_MIN+."
-  if [ "$OS" = "Darwin" ]; then brew upgrade node
-  else echo "Upgrade node (nvm install 22, or your distro's nodejs package) and re-run."; exit 1; fi
+  if [ "$AUTO" = 0 ]; then echo "Upgrade node to $NODE_MIN+ and re-run."; exit 1; fi
+  echo "node $NODE_MAJOR is too old -> upgrading it now."
+  if [ "$OS" = "Darwin" ]; then echo "  brew upgrade node"; brew upgrade node
+  else install_node_linux; fi
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+  [ "$NODE_MAJOR" -lt "$NODE_MIN" ] && { warn "still node $NODE_MAJOR; open a new terminal and re-run."; exit 1; }
 fi
 ok "node $(node --version)"
 
@@ -127,7 +165,7 @@ have herdr || { warn "herdr not on PATH; add \$HOME/.local/bin to PATH (or see h
 # ------------------------------------------------------------ 4. pi (agent)
 say "pi (coding agent)"
 if have pi; then ok "already installed: $(pi --version 2>&1 | head -1)"
-else npm install -g @earendil-works/pi-coding-agent; fi
+else echo "pi is MISSING -> npm install -g --ignore-scripts @earendil-works/pi-coding-agent"; npm install -g --ignore-scripts @earendil-works/pi-coding-agent; fi
 # FAILS IF: npm installed pi but its global bin dir is not on PATH, or the global
 # install needed root (a system node install).
 # FIX (manual): add npm's global bin to PATH:
